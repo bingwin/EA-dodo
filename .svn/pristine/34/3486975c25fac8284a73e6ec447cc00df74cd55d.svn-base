@@ -1,0 +1,315 @@
+<?php
+/**
+ * Created by PhpStorm.
+ * User: wuchuguang
+ * Date: 17-8-4
+ * Time: 上午10:39
+ */
+
+namespace app\index\service;
+
+
+use app\common\annotations\QueueType;
+use app\common\cache\Cache;
+use app\common\cache\driver\Queuer;
+use app\common\cache\driver\QueuerLog;
+use app\common\exception\JsonErrorException;
+use app\common\interfaces\QueueJob;
+use app\common\service\SwooleQueueJob;
+// use app\common\service\SwooleQueueWorker;
+// use Nette\Reflection\ClassType;
+use swoole\cmd\QueueStatus;
+use swoole\cmd\StopTableTask;
+use swoole\cmd\SwooleStatus;
+use swoole\SwooleCmder;
+use app\common\model\Queue as QueueModel;
+
+class Queue
+{
+    const QUEUE_JOB_FILE = APP_PATH."queue_job.php";
+    /**
+     * @var Queuer
+     */
+    private $cache;
+    /**
+     * @var \app\common\cache\driver\TaskWorker
+     */
+    private $taskCache;
+
+    /**
+     * @var QueuerLog
+     */
+    private $cacheLog;
+    private $myi = 0;
+    private $tmpQueues = [];
+
+    public function __construct()
+    {
+        $this->cache = Cache::store('queuer');
+        $this->cacheLog = Cache::store('queuerLog');
+        $this->taskCache = Cache::store('taskWorker');
+    }
+    
+    function lookupDir($dir, $callback = null)
+    {
+        $result = false;
+        if (is_dir($dir)) {
+            if ($handle = opendir($dir)) {
+                $result = true;
+                $this->myi++;
+                while(false !== ($file = readdir($handle))) {
+                    if ($file != '.' && $file != '..') {
+                        if($callback && ! is_dir($file)){
+                            array_push($this->tmpQueues, $callback . basename($file, '.php'));
+                        }else{
+                            $tmp = $dir . DIRECTORY_SEPARATOR . $file;
+                            if($this->myi < 2 && is_dir($tmp)){
+                                $res = $this->lookupDir($tmp);
+                                $res && ($this->myi--);
+                            }elseif ($this->myi >= 2 && 'queue' == $file){
+                                $res = $this->lookupDir($tmp, "app\\". basename($dir) ."\\queue\\");
+                                $res && ($this->myi--);
+                                break;
+                            }
+                        }
+                    }
+                }
+                closedir($handle);
+            }
+        }
+        return $result;
+    }
+    
+    public function getQueuesClass()
+    {
+    	/* $DS = DIRECTORY_SEPARATOR;
+    	 $preg = "/(\w+)\\{$DS}queue\\{$DS}(\w+)\.php/";
+    	 $callback = function($file)use($preg){
+    	 if(preg_match($preg, $file, $match)){
+    	 return "app\\$match[1]\\queue\\$match[2]";
+    	 }else{
+    	 return false;
+    	 }
+    	 };
+    	 $queues = dir_iteration(APP_PATH, $callback); */
+    	$this->lookupDir(APP_PATH);
+    	$queues = [];
+    	$no_exists = [];
+    	foreach ($this->tmpQueues as $queue){
+    		if(is_implements($queue, QueueJob::class)){
+    			$class = new $queue(null);
+    			$queues[] = [
+    					'queue_class' => $queue,
+    					'name' => $class->getName(),
+    					'desc' => $class->getDesc(),
+    					'author' => $class->getAnthor()
+    			];
+    		}else{
+    			$no_exists[] = $queue;
+    		}
+    	}
+    	return ['queues'=> $queues, 'not_exists'=> $no_exists];
+    }
+    
+    public function getQueues(){
+    	$allQueue = QueueModel::all();
+    	$swooles = [];
+    	$commons = [];
+    	$notExists = [];
+    	foreach ($allQueue as $tmp){
+    		$queue = path2class($tmp['queue_class']);
+    		if(is_implements($queue, QueueJob::class)){
+    			$info = $queue::jobInfo(false);
+    			switch ($info['type']){
+    				case 'swoole':
+    					$swooles[] = $info;
+    					break;
+    				case 'common':
+    					$commons[] = $info;
+    					break;
+    			}
+    		}
+    		
+    	}
+    	return ['swooles'=>$swooles,'commons'=>$commons];
+    }
+    
+    public function installQueue($qclass)
+    {
+    	try{
+	    	$model = QueueModel::get(['queue_class' => class2path($qclass)]);
+	    	$object = new $qclass(null);
+	    	if(!$model){
+	    		/**
+	    		 * @var $object AbsTasker
+	    		 */
+	    		$result = QueueModel::create([
+	    				'queue_class' => class2path($qclass),
+	    				'host_type' => 'common',
+	    				'name' => $object->getName(),
+	    				'author' => $object->getAuthor(),
+	    				'desc' => $object->getDesc(),
+	    				'open_state' => $this->cache->isStopSwooleQueue($qclass) ? 0 : 1
+	    		]);
+	    	}else{
+	    		$model->name = $object->getName();
+	    		$model->author = $object->getAuthor();
+	    		$model->desc = $object->getDesc();
+	    		$model->open_state = $this->cache->isStopSwooleQueue($qclass) ? 0 : 1;
+	    		$result = $model->save();
+	    	}
+    	}catch (\Throwable $e){
+    		throw new \Exception($e->getMessage());
+    	}
+    	return $result;
+    }
+    
+    public function uninstallQueue($qclass)
+    {
+    	$model = new QueueModel();
+    	$result = QueueModel::get(['queue_class' => class2path($qclass)]);
+    	if($result){
+    		return $model->where('id', $result->id)->delete();
+    	}else{
+    		throw new \Exception("队列类{$qclass}未安装");
+    	}
+    }
+    
+    public function initQueueInstall(){
+    	///安装所有
+    	$this->lookupDir(APP_PATH);
+    	foreach ($this->tmpQueues as $queue){
+    		if(is_implements($queue, QueueJob::class)){
+    			$this->installQueue($queue);
+    		}
+    	}
+    }
+    
+    public function elements($key)
+    {
+        return array_map(function($element)use($key){
+            $element = unserialize($element);
+            $count = $this->cache->failCount($key, $element);
+            return ['element'=>$element,'count'=>$count];
+            }, $this->cache->members($key));
+    }
+
+    public function elementsCount($key)
+    {
+        $members = $this->cache->membersCounts($key);
+        $results = [];
+        foreach ($members as $member => $remain){
+            $element = unserialize($member);
+            $count = $this->cache->failCount($key, $element);
+            $results[] = [
+                'element' => $element,
+                'count' => intval($count),
+                'remain'=> $remain
+            ];
+        }
+        return $results;
+    }
+
+    public function setTimeout($key, $timeout)
+    {
+        $this->cache->setTimeout($key, $timeout);
+    }
+
+    public function clear($key, $hosttype)
+    {
+    	$this->cache->delQueue($key, $hosttype);
+    }
+
+    public function removeElement($key, $element)
+    {
+        $result = $this->cache->memberRemove($key, $element);
+        if($result) $this->cache->removeTimer($key, $element);
+        return $result;
+    }
+
+    public function logs($key, $start, $end)
+    {
+        return $this->cacheLog->getRecordLog($key, $start, $end);
+    }
+
+    public function setRuntype($queuer, $hosttype, $types)
+    {
+    	$result = null;
+    	$priority = is_subclass_of($queuer, SwooleQueueJob::class) ? forward_static_call([$queuer, 'getPriority']) : 1;
+    	$oldType = QueueModel::get(['queue_class' => class2path($queuer)])->host_type;
+    	//$oldType = $this->cache->getQueueRunType($queuer);
+    	$config = $types[$oldType] ?? null;
+    	$updated = (new QueueModel())->isUpdate(true)->save(['host_type' => $hosttype], ['queue_class' => class2path($queuer)]);
+    	if($updated || $oldType == $hosttype){
+    		$result = $this->cache->changeQueueHostType($queuer, $oldType, $hosttype, $priority);
+    		$cmder = SwooleCmder::create($config);
+    		$obj = $cmder->send(new StopTableTask(['key'=>$queuer,'task'=>0]));
+    		//$result = $obj->getResult();
+    	}
+    	return $result;
+    }
+
+    /**
+     */
+    public function reload($queuer)
+    {
+        if($queueType = $this->cache->getQueue($queuer)){
+            if(is_extends($queueType, QueueJob::class)){
+                return $queueType::jobInfo();
+            }else{
+                throw new JsonErrorException("不合法的消费者");
+            }
+        }else{
+            throw new JsonErrorException("已不存在");
+        }
+    }
+
+    public function queueStatus($config = null, $hosttype = null, $queuer = null)
+    {
+    	$cmder = SwooleCmder::create($config);
+        $result= $cmder->send(new SwooleStatus(['queuer' => $queuer]));
+        $data = $result->getResult();
+        if(isset($data['items'])){
+            foreach ($data['items'] as $k => $val){
+                $data['items'][$k]['consuming'] = [];
+                if(is_subclass_of($val['task'], SwooleQueueJob::class)){
+                	$task = $this->cache->taskGets($val['workerId'], $hosttype);
+                    if(isset($task['queuer']) && $task['queuer'] == $val['task']) $data['items'][$k]['consuming'][] = $task['params'];
+                }
+            }
+        }
+        return $data;
+    }
+    
+    public function getConsumingNews($key, $hosttype=null, $workerId=null)
+    {
+        if($workerId){
+        	$task = $this->cache->taskGets($workerId, $hosttype);
+            if(isset($task['queuer']) && $task['queuer'] == $key) $data[] = $task['params'];
+        }else{
+            $data = $this->cache->showWaitQueue($key, 999);
+        }
+        return $data;
+    }
+
+    public function changeRunStatus($queuer, $taskId, $status, $config = null)
+    {
+    	$cmder = SwooleCmder::create($config);
+        $cmder->send(new QueueStatus(['taskId'=>$taskId,'queuer'=>$queuer]));
+
+    }
+
+    public function changeStatus($queuer, $status, $config = null)
+    {
+    	$response = null;
+    	if($this->cache->stopSwooleQueue($queuer, !$status)){
+        	QueueModel::update(['open_state' => $status ? 1 : 0], ['queue_class' => class2path($queuer)]);
+        	if(! $status){
+        		$cmder = SwooleCmder::create($config);
+        		$result = $cmder->send(new StopTableTask(['key'=>$queuer,'task'=>0]));
+        		$response =  $result->getResult();
+        	}
+        }
+        return $response;
+    }
+}

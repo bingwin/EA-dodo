@@ -1,0 +1,642 @@
+<?php
+
+namespace app\report\service;
+
+use app\common\model\User;
+use app\purchase\service\SupplierOfferService;
+use app\report\queue\InvoicingQueue;
+use app\warehouse\service\WarehouseGoods;
+use think\Db;
+use think\Exception;
+use think\Loader;
+use app\common\model\WarehouseLog;
+use app\common\cache\Cache;
+use app\warehouse\service\StockIn as StockInService;
+use app\common\model\StockInDetail as StockInDetail;
+use app\common\model\StockOutDetail as StockOutDetail;
+use app\goods\service\GoodsSkuAlias as GoodsSkuAliasService;
+use \app\goods\service\GoodsHelp as GoodsHelp;
+use app\common\model\GoodsSku;
+use app\common\model\Goods;
+use app\common\service\Common;
+use app\report\model\ReportExportFiles;
+use app\common\service\CommonQueuer;
+
+Loader::import('phpExcel.PHPExcel', VENDOR_PATH);
+
+/**
+ * Created by PhpStorm.
+ * User: laiyongfeng
+ * Date: 2019/03/20
+ * Time: 19:17
+ */
+class Invoicing
+{
+    protected $stockInDetailModel = null;
+    protected $stockOutDetailModel = null;
+    protected $warehouseLogModel = null;
+    protected $start_time = 0;//开始时间
+    protected $end_time = 0;//时间时间
+    protected $inout_where = [];
+    protected $where = [];
+    protected $warehouse_id = 0;
+    protected $colMap = [
+        'A' => ['title' => '订单号', 'key' => '', 'width' => 30],
+        'B' => ['title' => '订单类型', 'key' => '', 'width' => 15],
+        'C' => ['title' => '账号简称', 'key' => '', 'width' => 10],
+        'D' => ['title' => '站点', 'key' => '', 'width' => 10],
+        'E' => ['title' => '销售员', 'key' => '', 'width' => 10],
+        'F' => ['title' => '销售组长', 'key' => '', 'width' => 10],
+        'G' => ['title' => '销售主管', 'key' => '', 'width' => 10],
+        'H' => ['title' => '包裹数', 'key' => '', 'width' => 10],
+        'I' => ['title' => '平台订单号', 'key' => '', 'width' => 30],
+        'J' => ['title' => '付款日期', 'key' => '', 'width' => 15],
+        'K' => ['title' => '发货日期', 'key' => '', 'width' => 15],
+        'L' => ['title' => '仓库类型', 'key' => '', 'width' => 15],
+        'M' => ['title' => '发货仓库', 'key' => '', 'width' => 20],
+        'N' => ['title' => '邮寄方式', 'key' => '', 'width' => 20],
+        'O' => ['title' => '包裹号', 'key' => '', 'width' => 20],
+        'P' => ['title' => '跟踪号', 'key' => '', 'width' => 20],
+        'Q' => ['title' => '物流商单号', 'key' => '', 'width' => 20],
+        'R' => ['title' => '总售价原币', 'key' => '', 'width' => 10],
+        'S' => ['title' => '渠道成交费原币', 'key' => '', 'width' => 10],
+        'T' => ['title' => '币种', 'key' => '', 'width' => 10],
+        'U' => ['title' => '汇率', 'key' => '', 'width' => 10],
+        'V' => ['title' => '售价CNY', 'key' => '', 'width' => 15],
+        'W' => ['title' => '渠道成交费（CNY）', 'key' => '', 'width' => 20],
+        'X' => ['title' => '收款费用', 'key' => '', 'width' => 15],
+        'Y' => ['title' => '商品成本', 'key' => '', 'width' => 15],
+        'Z' => ['title' => '包装费用', 'key' => '', 'width' => 15],
+        'AA' => ['title' => '物流费用', 'key' => '', 'width' => 15],
+        'AB' => ['title' => '头程费用', 'key' => '', 'width' => 15],
+        'AC' => ['title' => '利润', 'key' => '', 'width' => 10],
+        'AD' => ['title' => '货品总数', 'key' => '', 'width' => 15],
+        'AE' => ['title' => '订单备注', 'key' => '', 'width' => 30],
+
+    ];
+
+    public function __construct()
+    {
+        if (is_null($this->stockInDetailModel)) {
+            $this->stockInDetailModel = new StockInDetail();
+        }
+        if (is_null($this->stockOutDetailModel)) {
+            $this->stockOutDetailModel = new StockOutDetail();
+        }
+        if (is_null($this->warehouseLogModel)) {
+            $this->warehouseLogModel = new WarehouseLog();
+        }
+    }
+
+
+    /*
+     * @desc 分类查询
+     * @param int $category_id
+     */
+    public function category($category_id)
+    {
+        $category_list = Cache::store('category')->getCategoryTree();
+        if (isset($category_list[$category_id])) {
+            $child = $category_list[$category_id]['child_ids'];
+            if ($child) {
+                $child = implode(',', $child);
+                $category_ids = $child;
+            } else {
+                $category_ids = [$category_id];
+            }
+        } else {
+            $category_ids = [$category_id];
+        }
+        $goods = (new Goods())->where('category_id', 'in', $category_ids)->field('id')->select();
+        $goods_ids = array_map(function ($good) {
+            return $good->id;
+        }, $goods);
+        $this->where .= ' and goods_id in(' . implode(',', $goods_ids) . ')';
+
+    }
+
+    /**
+     * @desc 汇总列表
+     * @param array $params
+     * @param string $type
+     */
+    private function where($params, $type = 'summary')
+    {
+        if ($type == 'summary') {
+            $this->where = 'l1.warehouse_id = ' . $this->warehouse_id;
+            $this->where .= " and l1.create_time >= {$this->start_time} and l1.create_time <= {$this->end_time}";
+        } else {
+            $this->where = 's.warehouse_id = ' . $this->warehouse_id;
+            $this->where .= " and s.update_time >= {$this->start_time} and s.update_time <= {$this->end_time}";
+        }
+        if (($snType = param($params, 'snType')) && ($snValue = param($params, 'snText'))) {
+            switch ($snType) {
+                case 'sku':
+                    $sku_arr = json_decode($snValue);
+                    if (!$sku_arr) {
+                        break;
+                    }
+                    $sku_id_arr = [];
+                    foreach ($sku_arr as $value) {
+                        $sku_id = GoodsSkuAliasService::getSkuIdByAlias($value);//别名
+                        if (!$sku_id) {
+                            $sku_id = GoodsHelp::sku2id($value);
+                        }
+                        array_push($sku_id_arr, $sku_id);
+                    }
+                    $this->where .= ' and l1.sku_id in (' . implode(',', $sku_id_arr) . ')';
+                    break;
+                case 'name':
+                    $sku_id_arr = (new GoodsSku())->where('spu_name', 'like', "%$snValue%")->column('id');
+                    $this->where .= ' and l1.sku_id in (' . implode(',', $sku_id_arr) . ')';
+                    break;
+                default:
+                    break;
+            }
+        }
+        if (param($params, 'category_id')) {
+            $this->category($params['category_id']);
+        }
+    }
+
+    /**
+     * @desc 设置开始结束时间
+     * @param array $params
+     * @throws Exception
+     */
+    private function setStartEndTime($params)
+    {
+        if (!param($params, 'date_from')) {
+            throw new Exception('开始时间不能为空');
+        }
+        if (!param($params, 'date_to')) {
+            throw new Exception('结束时间不能为空');
+        }
+        $this->start_time = strtotime($params['date_from']);
+        $this->end_time = strtotime($params['date_to']) + (3600 * 24 - 1);
+    }
+
+    /**
+     * @desc 设置仓库
+     * @param array $params
+     * @throws Exception
+     */
+    private function setWarehouseId($params)
+    {
+        if (!param($params, 'warehouse_id')) {
+            throw new Exception('仓库不能为空');
+        }
+        $this->warehouse_id = $params['warehouse_id'];
+    }
+
+    /**
+     * @desc 出库数据
+     * @param  array $param
+     * @return array
+     */
+    private function getOutData($param)
+    {
+        $field = 'd.sku_id, s.warehouse_id, sum(d.quantity), sum(d.price+d.amount)';
+        return $this->stockOutDetailModel->alias('d')
+            ->join('stock_out s', 's.id = d.stock_in_detail')
+            ->where($this->inout_where)
+            ->field($field)
+            ->column($field, 'concat(d.sku_id, "_", s.warehouse_id)');
+    }
+
+    /**
+     * @desc 入库数据
+     * @param  array $param
+     * @return array
+     */
+    private function getInData($param)
+    {
+        $field = 'd.sku_id, s.warehouse_id, sum(d.quantity), sum(d.price+d.amount)';
+        return $this->stockInDetailModel->alias('d')
+            ->join('stock_in s', 's.id = d.stock_in_detail')
+            ->where($this->inout_where)
+            ->field($field)
+            ->group('d.sku_id')
+            ->column($field, 'sku_id');
+    }
+
+
+    /**
+     * @desc 期末数据
+     * @param  array $params
+     * @return array
+     */
+    private function geEndLogData($params)
+    {
+        $page = param($params, 'page', 1);
+        $pageSize = param($params, 'pageSize', 1);
+        $start = ($page - 1)*$pageSize;
+        $sql = "SELECT l2.sku_id, l2.stock_quantity
+        FROM (
+            SELECT *
+            FROM warehouse_log l1
+            where {$this->where}
+            ORDER BY l1.id desc LIMIT 99999999
+            ) l2
+        GROUP BY l2.sku_id  limit {$start}, {$pageSize}";
+        $data = DB::execute($sql);
+        return $data;
+    }
+
+    /**
+     * @desc 汇总列表
+     * @return array
+     */
+    private function summaryCount()
+    {
+        $sql = "SELECT count(*)
+        FROM (
+            SELECT *
+            FROM warehouse_log l1
+            where {$this->where}
+            ORDER BY l1.id desc  LIMIT 99999999
+            ) l2
+        GROUP BY l2.sku_id";
+        return $data = DB::execute($sql);
+    }
+
+    /**
+     * @desc 期初数据
+     * @param  array $sku_id_arr
+     * @return array
+     */
+    private function getStartLogData($sku_id_arr)
+    {
+        $sql = "SELECT l2.sku_id, l2.stock_quantity
+        FROM (
+            SELECT *
+            FROM warehouse_log l1
+            where l1.create_time < {$this->end_time}  and l1sku_id in (" . implode(',', $sku_id_arr) . ") and l1.warehouse_id = {$this->warehouse_id}
+            ORDER BY l1.id desc  LIMIT 99999999
+            ) l2
+        GROUP BY l2.sku_id";
+        $data = DB::execute($sql);
+        return $data;
+    }
+
+    /**
+     * @desc 汇总列表
+     * @param array $data
+     * @return array
+     */
+    private function getData($data)
+    {
+        $result = [];
+        $stockInService = new StockInService;
+        $in_types = $stockInService->getTypes();
+        $type = in_array($data['type'], $in_types) ? 1 : 2; //1-入库 2-出库
+        $result['qty'] = $type == 1 ? $data['stock_quantity'] + $data['quantity'] : $data['stock_quantity'] - $data['quantity'];
+        if ($data['average_price']) {
+            $result['price'] = $data['average_price'] + $data['shipping_cost'];
+        } else {
+            //原来没有存平均单价
+            if ($type == 1) {
+                $result['price'] = ($data['per_cost'] * $data['stock_quantity'] + $data['stock_quantity'] * $data['price']) / $end_qty;
+            } else {
+                $result['price'] = $data['per_cost'];
+            }
+        }
+        $result['amount'] = $result['qty'] * $result['price'];
+    }
+
+    /**
+     * @desc 汇总列表
+     * @param  array $params
+     * @return array
+     */
+    public function summary($params)
+    {
+        $stockInService = new StockInService;
+        $supplierOfferService = new SupplierOfferService();
+        $this->setStartEndTime($params);
+        $this->setWarehouseId($params);
+        $this->where($params);
+        $warehouse = cache::store('warehouse')->getWarehouse($this->warehouse_id);
+        //期末数据
+        $end_data = $this->geEndLogData($params)['data'];
+        $sku_id_arr = array_column($end_data, 'sku_id');
+        //期初数据
+        $start_data = $this->getStartLogData($sku_id_arr);
+        $start_sku_data = [];
+        foreach ($start_data as $item) {
+            $start_sku_data[$item['sku_id']] = $item;
+        }
+        //出入库
+        $this->inout_where['d.sku_id'] = ['in', $sku_id_arr];
+        $in_data = $this->getInData($params);  //入库数据
+        $out_data = $this->getOutData($params); //出库数据
+
+        $data = [];
+        $end_qty_arr = [];
+        foreach ($end_data as $end) {
+            $sku_info = Cache::store('goods')->getSkuInfo($end['id']);
+            //期末数据
+            $this_end = $this->getData($end);
+            $end_qty = $this_end['qty'];//期末库存
+            $end_price = $this_end['price'];//期末库存
+            $end_amount = $this_end['amount']; //期末库存
+            $end_qty_arr[$end['sku_id']] = $end_qty;
+
+            //期初数据
+            $init_qty = 0;//期初库存
+            $init_price = 0;//期初单价
+            $init_amount = 0; //期初数量
+            $start = $start_sku_data[$end['sku_id']] ?? [];
+            if ($start) {
+                $this_start = $this->getData($start);
+                $init_qty = $this_start['qty'];
+                $init_price = $this_start['price'];
+                $init_amount = $this_start['amount'];
+            }
+
+            //入库数据
+            $in = $in_data[$end['sku_id']] ?? [];
+            $in_qty = $in['quantity'] ?? '';
+            $in_price = $in ? $in['shipping_cost'] + $in['price'] : 0;
+            $in_amount = sprintf('.4%', $in_qty * $in_price);
+
+            //出库数据
+            $out = $out_data[$end['sku_id']] ?? [];
+            $out_qty = $out['quantity'] ?? '';
+            $out_price = $out ? $out['shipping_cost'] + $out['price'] : 0;
+            $out_amount = sprintf('.4%', $out_price * $out_qty);
+
+            //组装数据
+            $data[$end['sku_id']] = [
+                'sku' => $sku_info['sku'],
+                'spu_name' => $sku_info['spu_name'],
+                'warehouse_name' => $warehouse['name'],
+                'init_qty' => $init_qty,
+                'inti_price' => $init_price,
+                'init_amount' => $init_amount,
+                'end_qty' => $end_qty,
+                'end_price' => $end_price,
+                'end_amount' => $end_amount,
+                'in_qty' => $in_qty,
+                'in_price' => $in_price,
+                'in_amount' => $in_amount,
+                'out_qty' => $out_qty,
+                'out_price' => $out_price,
+                'out_amount' => $out_amount,
+                'check_qty' => 0, //盘点数据
+                'latest purchase_price' => 0, //最近采购单价
+                'latest_supply_prcie' => $supplierOfferService->getGoodsOffer($end['sku_id']),
+                'less_third' => 0,
+                'third_sixty' => 0,
+                'sixty_ninety' => 0,
+                'more_ninety' => 0,
+            ];
+        }
+        $stockInService->batchGetAgeDetail($this->warehouse_id, $end_qty_arr, $this->end_time, $data);
+        return $data;
+    }
+
+    /**
+     * @desc 入库运费
+     * @param int $stock_in_id
+     * @param int $sku_id
+     * @return int
+     */
+    private function getInShippingFee($stock_in_id, $sku_id)
+    {
+        $where = [
+            'stock_in_id' => $stock_in_id,
+            'sku_id' => $sku_id,
+        ];
+        return $this->stockInDetailModel->where($where)->value('shipping_cost', 0);
+    }
+
+
+    /**
+     * @desc 出库运费
+     * @param int $stock_out_id
+     * @param int $sku_id
+     * @return int
+     */
+    private function getOutShippingFee($stock_out_id, $sku_id)
+    {
+        $where = [
+            'stock_out_id' => $stock_out_id,
+            'sku_id' => $sku_id,
+        ];
+        return $this->stockOutDetailModel->where($where)->value('shipping_cost', 0);
+    }
+
+    /**
+     * @desc 明细列表
+     * @param $data
+     * @return false|\PDOStatement|string|\think\Collection
+     */
+    public function detail($params)
+    {
+        $this->setStartEndTime($params);
+        $this->setWarehouseId($params);
+        $this->where($params);
+        $stockInService = new StockInService;
+        $page = param($params, 'page');
+        $pageSize = param($params, 'pageSize');
+        $data = (new  WarehouseLog())
+            ->where($this->where)
+            ->page($page, $pageSize)
+            ->select();
+        $in_types = $stockInService->getTypes();
+        $warehouse = cache::store('warehouse')->getWarehouse($this->warehouse_id);
+        foreach ($data as &$item) {
+            $sku_info = Cache::store('goods')->getSkuInfo($item['id']);
+            $item['spu_name'] = param($sku_info, 'name');
+            $item['warehouse_name'] = $warehouse['name'];
+            if (!$item['shipping_fee']) {
+                if (in_array($data['type'], $in_types)) {
+                    $item['shipping_fee'] = $this->getInShippingFee($item['stock_inout_id'], $item['sku_id']);
+                } else {
+                    $item['shipping_fee'] = $this->getOutShippingFee($item['stock_inout_id'], $item['sku_id']);
+                }
+            }
+            $item['warehouse'] = cache::store('user')->getOneUserRealname($item['create_id']);
+            $item['creator'] = cache::store('user')->getOneUserRealname($item['create_id']);
+            $item['amount'] = ($item['price'] + $item['shipping_fee']) * $item['quantity'];
+        }
+        return $data;
+    }
+    /**
+     * @desc 明细总数
+     * @return int
+     */
+    public function detailCount()
+    {
+        return (new  WarehouseLog())
+            ->where($this->where)
+            ->count();
+    }
+
+    /**
+     * @desc 创建导出文件名
+     * @param string $type
+     * @return string
+     */
+    protected function createExportFileName($type = 'summary')
+    {
+        $fileName = $type == 'summary' ? '进销存汇总报表' : '进销存明细报表';
+        $lastID = (new ReportExportFiles())->order('id desc')->value('id');
+        $fileName .= ($lastID + 1);
+        $fileName .= '_' . $this->start_time . '_' . $this->end_time;
+        return $fileName;
+    }
+
+    /**
+     * 获取参数
+     * @param array $params
+     * @param $key
+     * @param $default
+     * @return mixed
+     */
+    public function getParameter(array $params, $key, $default)
+    {
+        $v = $default;
+        if (isset($params[$key]) && $params[$key]) {
+            $v = $params[$key];
+        }
+        return $v;
+    }
+
+
+    /**
+     * 申请导出
+     * @param $params
+     * @return bool
+     * @throws Exception
+     * @throws \Exception
+     */
+    public function applyExport($params)
+    {
+        Db::startTrans();
+        try {
+            $userId = Common::getUserInfo()->toArray()['user_id'];
+            $cache = Cache::handler();
+            $lastApplyTime = $cache->hget('hash:export_apply', $userId);
+            if ($lastApplyTime && time() - $lastApplyTime < 5) {
+                throw new Exception('请求过于频繁', 400);
+            } else {
+                $cache->hset('hash:export_apply', $userId, time());
+            }
+            $model = new ReportExportFiles();
+            $model->applicant_id = $userId;
+            $model->apply_time = time();
+            $model->export_file_name = $this->createExportFileName();
+            $model->status = 0;
+            if (!$model->save()) {
+                throw new Exception('导出请求创建失败', 500);
+            }
+            $params['file_name'] = $model->export_file_name;
+            $params['apply_id'] = $model->id;
+
+            $queuer = new CommonQueuer(InvoicingQueue::class);
+            $queuer->push($params);
+            Db::commit();
+            return true;
+        } catch (\Exception $ex) {
+            Db::rollback();
+            if ($ex->getCode()) {
+                throw $ex;
+            } else {
+                Cache::handler()->hset(
+                    'hash:report_export_apply',
+                    $params['apply_id'] . '_' . time(),
+                    $ex->getMessage());
+                throw new Exception('导出请求创建失败', 500);
+            }
+        }
+    }
+
+
+    /**
+     * 导出数据至excel文件
+     * @param $params
+     * @return bool
+     * @throws Exception
+     */
+    public function export($params)
+    {
+        set_time_limit(0);
+        try {
+            ini_set('memory_limit','4096M');
+            $applyId = $this->getParameter($params, 'apply_id', '');
+            if (!$applyId) {
+                throw new Exception('导出申请id获取失败');
+            }
+            $fileName = $this->getParameter($params, 'file_name', '');
+            if (!$fileName) {
+                throw new Exception('导出文件名未设置');
+            }
+
+            $downLoadDir = '/download/invoicing/';
+            $saveDir = ROOT_PATH . 'public' . $downLoadDir;
+            if (!is_dir($saveDir) && !mkdir($saveDir, 0777, true)) {
+                throw new Exception('导出目录创建失败');
+            }
+            $fullName = $saveDir . $fileName;
+            //创建excel对象
+            $writer = new \XLSXWriter();
+            $titleMap = $this->colMap;
+            $title = [];
+            foreach ($titleMap as $t => $tt) {
+                if (isset($tt['type']) && $tt['type'] == 'price') {
+                    $title[$tt['title']] = 'price';
+                } else {
+                    $title[$tt['title']] = 'string';
+                }
+            }
+            $this->setStartEndTime($params);
+            $this->setWarehouseId($params);
+            $this->where($params);
+            if ($params['type'] == 'summary') {
+                //统计需要导出的数据行
+                $count = $this->summaryCount();
+            } else {
+                $count = $this->detailCount();
+            }
+            $pageSize = 10000;
+            $loop = ceil($count / $pageSize);
+            $writer->writeSheetHeader('Sheet1', $title);
+            //分批导出
+            for ($i = 0; $i < $loop; $i++) {
+                $params = [
+                    'page'=> $i+1,
+                    'pageSize'=> $pageSize
+                ];
+                $data = $this->$params['type']($params);
+                foreach ($data as $r) {
+                    $writer->writeSheetRow('Sheet1', $r);
+                }
+                unset($data);
+            }
+
+            $writer->writeToFile($fullName);
+            if (is_file($fullName)) {
+                $applyRecord = ReportExportFiles::get($applyId);
+                $applyRecord->exported_time = time();
+                $applyRecord->download_url = $downLoadDir . $fileName;
+                $applyRecord->status = 1;
+                $applyRecord->isUpdate()->save();
+            } else {
+                throw new Exception('文件写入失败');
+            }
+        } catch (\Exception $ex) {
+            $applyRecord = ReportExportFiles::get($applyId);
+            $applyRecord->status = 2;
+            $applyRecord->error_message = $ex->getMessage();
+            $applyRecord->isUpdate()->save();
+            Cache::handler()->hset(
+                'hash:report_export',
+                $applyId . '_' . time(),
+                '申请id: ' . $applyId . ',导出失败:' . $ex->getMessage());
+
+        }
+        return true;
+    }
+}

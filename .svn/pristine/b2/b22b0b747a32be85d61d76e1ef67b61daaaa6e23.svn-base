@@ -1,0 +1,65 @@
+<?php
+/**
+ * Created by PhpStorm.
+ * User: Administrator
+ * Date: 2019/3/26
+ * Time: 9:29
+ */
+
+namespace app\goods\controller;
+
+
+use app\common\controller\Base;
+use app\common\exception\JsonErrorException;
+use app\goods\service\GoodsDiscount as service;
+use think\Exception;
+use think\Request;
+
+
+/**
+ * @module 跌价补贴
+ * @title 跌价补贴模块
+ * @url /goods-discount
+ * @author zhuda
+ * @package app\index\controller
+ */
+class GoodsDiscount extends Base
+{
+
+    protected $service;
+
+    public function __construct()
+    {
+        parent::__construct();
+        if (is_null($this->service)) {
+            $this->service = new service();
+        }
+    }
+
+    /**
+     * @title 跌价申请（列表）
+     * @method GET
+     * @return \think\response\Json
+     * @throws \think\exception\DbException
+     */
+    public function index()
+    {
+        $result = $this->service->getGoodsDiscountList();
+        return json($result, 200);
+    }
+
+    /**
+     * @title 跌价申请（单条）
+     * @method GET
+     * @url /goods-discount/read
+     * @throws \think\exception\DbException
+     */
+    public function goodsDiscountFind()
+    {
+        $request = Request::instance();
+        $params = $request->param();
+        $result = $this->service->read($params);
+        return json($result, 200);
+    }
+
+}

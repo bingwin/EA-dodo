@@ -1,0 +1,44 @@
+<?php
+
+namespace service\amazon;
+
+use app\common\cache\Cache;
+use Waimao\AmazonMws\AmazonConfig;
+
+/**
+ * 亚马逊订单api服务类
+ * @author lin
+ * @time 2018/11/16 14:33
+ */
+class AmazonOrderServiceHandle
+{
+
+
+    /**
+     * 构建amazonorder api 对象
+     * @param $accountId
+     * @return AmazonOrderApi
+     * @throws \think\Exception
+     */
+    public function initAmazonOrderApi($accountInfo)
+    {
+//        $accountInfo = Cache::store('AmazonAccount')->getTableRecord($accountId);
+        if ((empty($accountInfo['access_key_id']) || empty($accountInfo['secret_key'])) && (empty($accountInfo['developer_access_key_id']) || empty($accountInfo['developer_secret_key']) || empty($accountInfo['auth_token']))) {
+            return false;
+        }
+        $appname = 'DB Order ';
+        $appversion = '0.1';
+        $aws_access_key_id = trim(paramNotEmpty($accountInfo, 'developer_access_key_id', $accountInfo['access_key_id']));
+        $aws_secret_access_key = trim(paramNotEmpty($accountInfo, 'developer_secret_key', $accountInfo['secret_key']));
+        $aws_auth_token = trim(paramNotEmpty($accountInfo, 'auth_token',''));
+        $merchant_id = trim($accountInfo['merchant_id']);
+        $account_id = $accountInfo['id'];
+        $site = $accountInfo['site'];
+        $marketplace_id = AmazonConfig::$marketplaceId[$site];
+        $serviceUrl = AmazonConfig::$serverUrl[$site] . '/Orders/2013-09-01';
+        $amazon = new AmazonOrderApi($appname, $appversion, $aws_access_key_id, $aws_secret_access_key, $merchant_id, $marketplace_id, $serviceUrl, $account_id, $site, $aws_auth_token);
+        return $amazon;
+    }
+
+
+}

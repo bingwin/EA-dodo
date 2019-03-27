@@ -1,0 +1,42 @@
+<?php
+/**
+ * Created by PhpStorm.
+ * User: wuchuguang
+ * Date: 17-8-19
+ * Time: 下午2:26
+ */
+
+namespace swoole\cmd;
+
+
+use swoole\SwooleCmd;
+use swoole\SwooleCmdResult;
+
+class SwooleStatus extends SwooleCmd
+{
+    public  function execute(\swoole_websocket_server $server): SwooleCmdResult
+    {
+        $taskUsed = $server->tableTask->count();
+        $taskMax = $server->setting['task_worker_num'];
+        $result = new SwooleCmdResult($this);
+        $items = [];
+        foreach ($server->tableTask as $id => $item){
+            $id = intval($id);
+            if(!empty($this->data['queuer'])){
+                if($this->data['queuer'] == $item['task']) $items[$id] = $item;
+            }else{
+                $items[$id] = $item;
+            }
+        }
+        if(count($items)){
+            ksort($items);
+            $items = array_values($items);
+        }
+        $used = [];
+        foreach ($server->tableQueue as $queue => $item){
+            $used[$queue] = $item;
+        }
+        $result->setResult(['taskUsed'=>$taskUsed,'taskMax'=>$taskMax, 'items'=>$items, 'usesd'=>$used]);
+        return $result;
+    }
+}

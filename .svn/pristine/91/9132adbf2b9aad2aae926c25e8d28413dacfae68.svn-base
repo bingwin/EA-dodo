@@ -1,0 +1,160 @@
+<?php
+
+
+namespace app\index\service;
+
+use app\common\model\channel\ChannelDistributionSetting as ModelChannelDistribution;
+use app\common\cache\Cache;
+use app\common\model\ebay\EbaySite;
+use app\order\service\OrderService;
+use app\common\service\ChannelAccountConst;
+
+class ChannelDistribution
+{
+    public function getStatus()
+    {
+        $statusArr = ModelChannelDistribution::STATUS_TXT;
+        $result = [];
+        foreach ($statusArr as $k => $statusInfo) {
+            $row = [
+                'value' => $k,
+                'label' => $statusInfo,
+            ];
+            $result[] = $row;
+        }
+        return $result;
+    }
+
+    public function getFirstCategories()
+    {
+        $result = [];
+        $category_list = Cache::store('category')->getCategoryTree();
+        foreach ($category_list['child_ids'] as $id) {
+            $row = [];
+            $row['value'] = $id;
+            $row['label'] = $category_list[$id]['title'];
+            $result[] = $row;
+        }
+        return $result;
+    }
+
+    /**
+     * @title 获取站点
+     * @param $channel_id
+     * @return array
+     * @author starzhan <397041849@qq.com>
+     */
+    public function getSites($channel_id)
+    {
+        $channelInfo = (new ChannelService())->getInfoById($channel_id);
+        if (!$channelInfo) {
+            return [];
+        }
+        $result = [];
+        switch ($channel_id) {
+            case 2:
+                $siteArray = Cache::store('account')->amazonSite();
+                foreach ($siteArray as $siteInfo) {
+                    $row = [];
+                    $row['value'] = $siteInfo['site'];
+                    $row['label'] = $siteInfo['site'];
+                    $result[] = $row;
+                }
+                break;
+            case 1:
+                $tmp = Cache::store('ebaySite')->getAllSites();
+                foreach ($tmp as $v) {
+                    $info = json_decode($v, true);
+                    $row['label'] = $info['abbreviation'];
+                    $row['value'] = $info['siteid'];
+                    $result[] = $row;
+                }
+                break;
+            default:
+                $result = [];
+                break;
+
+        }
+        return $result;
+    }
+
+    public function getAccounts($channelId)
+    {
+        $account = [];
+        $result = [];
+        switch ($channelId) {
+            case ChannelAccountConst::channel_ebay:
+                $account = Cache::store('EbayAccount')->getAllAccounts();
+                break;
+            case ChannelAccountConst::channel_amazon:
+                $account = Cache::store('AmazonAccount')->getTableRecord();
+                break;
+        }
+        foreach ($account as $accountInfo) {
+            $row = [];
+            $row['value'] = $accountInfo['id'];
+            $row['label'] = $accountInfo['code'];
+            $result[] = $row;
+        }
+        return $result;
+    }
+
+    /**
+     * @title 注释..
+     * @param $channelId
+     * @author starzhan <397041849@qq.com>
+     */
+    public function getDepartments($channelId)
+    {
+        $department = new Department();
+        $departmentTree = $department->getDepartmentTreeByChannelId($channelId);
+        return $departmentTree;
+    }
+
+    /**
+     * @title 获取职位
+     * @author starzhan <397041849@qq.com>
+     */
+    public function getPositions()
+    {
+        $job = new JobService();
+        $result = [];
+        $aJob = $job->selectByType();
+        foreach ($aJob as $jobInfo) {
+            $row = [];
+            $row['value'] = $jobInfo['id'];
+            $row['label'] = $jobInfo['name'];
+            $result[] = $row;
+        }
+        return $result;
+    }
+
+    /**
+     * @title 注释..
+     * @param $id
+     * @param $param
+     * @param $userInfo
+     * @author starzhan <397041849@qq.com>
+     */
+    public function update($id, $param, $userInfo)
+    {
+        unset($param['id']);
+        $ModelChannelDistribution = new ModelChannelDistribution();
+        $old = $ModelChannelDistribution->where('channel_id', $id)->find();
+        if ($old) {
+            $param['updater_id'] = $userInfo['user_id'];
+            $param['update_time'] = time();
+            $old->allowField(true)->isUpdate(true)->save($param);
+        } else {
+            $param['creator_id'] = $userInfo['user_id'];
+            $param['create_time'] = time();
+            $ModelChannelDistribution = new ModelChannelDistribution();
+            $ModelChannelDistribution
+                ->allowField(true)
+                ->isUpdate(false)
+                ->save($param);
+        }
+        return ['message'=>'保存成功'];
+    }
+
+}

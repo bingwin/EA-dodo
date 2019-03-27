@@ -1,0 +1,23 @@
+<?php
+/**
+ * Created by PhpStorm.
+ * User: wuchuguang
+ * Date: 17-3-28
+ * Time: 上午10:52
+ */
+
+namespace app\index\service;
+
+
+use erp\AbsServer;
+use app\order\access\Order;
+use app\order\access\Warehouse;
+use think\Request;
+
+class Test extends AbsServer
+{
+    //\app\common\model\Test 
+    protected $test;
+    protected $model = \app\common\model\Test::class;
+    protected $orderServer = \app\common\service\Order::class;
+}

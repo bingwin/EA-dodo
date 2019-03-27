@@ -1,0 +1,91 @@
+<?php
+/**
+ * Created by PhpStorm.
+ * User: Administrator
+ * Date: 2019/3/26
+ * Time: 9:36
+ */
+
+namespace app\goods\service;
+
+
+use app\common\model\GoodsDiscount as Model;
+use think\Request;
+use app\common\exception\JsonErrorException;
+
+
+class GoodsDiscount
+{
+
+    /**
+     * @var creditcard
+     */
+    protected $model;
+
+    public function __construct()
+    {
+        if (is_null($this->model)) {
+            $this->model = new Model();
+        }
+    }
+
+    /**
+     * 接收错误并返回,当你调用此类时，如果遇到需要获取错误信息时，请使用此方法。
+     * @return mixed
+     */
+    public function getError()
+    {
+        return $this->error;
+    }
+
+    /**
+     * 根据条件查询记录
+     * @param array $data
+     * @return array|false|\PDOStatement|string|\think\Model
+     * @throws \think\exception\DbException
+     */
+    public function read(array $data)
+    {
+        $where = $this->getWhere($data);
+        $info = $this->model->where($where)->find();
+        if (!$info) {
+            $this->error = '无法查询到记录';
+        }
+        return $info;
+    }
+
+    /**
+     * 获取查询条件
+     * @param $params
+     * @return array
+     */
+    public function getWhere($params)
+    {
+        $where = [];
+        if (isset($params['warehouse_id']) && ($params['warehouse_id'] !== '')) {
+            $where['goods_discount.warehouse_id'] = $params['warehouse_id'];
+        }
+
+        if (isset($params['sku_id']) && ($params['sku_id'] !== '')) {
+            $where['goods_discount.sku_id'] = $params['sku_id'];
+        }
+
+        if (isset($params['valid_time']) && ($params['valid_time'] !== '')) {
+            $where['goods_discount.valid_time'] = ['egt',strtotime($params['valid_time'])];
+        }
+
+        if (isset($params['over_time']) && ($params['over_time'] !== '')) {
+            $where['goods_discount.over_time'] = ['elt',strtotime($params['over_time'])];
+        }
+
+        if (isset($params['time']) && ($params['time'] !== '')) {
+            $where['goods_discount.over_time'] = ['elt',strtotime($params['over_time'])];
+            $where['goods_discount.valid_time'] = ['egt',strtotime($params['valid_time'])];
+        }
+
+        return $where;
+
+    }
+
+
+}

@@ -1,0 +1,116 @@
+<?php
+namespace app\publish\queue;
+
+
+use app\common\model\ebay\EbayListingImage;
+use app\common\service\SwooleQueueJob;
+use app\common\cache\Cache;
+use app\common\model\ebay\EbayListing;
+use app\common\model\ebay\EbayListingSetting;
+use app\publish\helper\ebay\EbayPublish;
+use app\publish\service\EbayPackApi;
+use app\publish\service\EbayDealApiInformation;
+use app\common\model\ebay\EbayAccount;
+use app\publish\helper\ebay\EbayPublish as EbayPublishHelper;
+use think\Exception;
+
+class EbayPublishItemQueuer extends SwooleQueueJob
+{
+    protected $maxFailPushCount = 0;
+
+    /**
+     * @doc 队列优先级
+     * @var int
+     */
+    protected static $priority = self::PRIORITY_HEIGHT;
+
+    /**
+     * @doc 获取优先级，越高越高！
+     * @return int
+     */
+    public static function getPriority()
+    {
+        return static::$priority;
+    }
+
+    public function getName():string
+    {
+        return 'ebay刊登listing队列';
+    }
+
+    public function getDesc():string
+    {
+        return 'ebay刊登listing队列';
+    }
+
+    public function getAuthor():string
+    {
+        return 'wlw2533';
+    }
+    
+    public static function swooleTaskMaxNumber():int
+    {
+        return 30;
+    }
+
+    public function execute()
+    {
+        set_time_limit(0);
+        $listingId = $this->params;
+//        Cache::handler()->set('ebay:debug:publishQueue:publishItemQueueStart_'.$listingId,date('Y-m-d H:i:s'),300);
+        try {
+            $res = (new EbayPublishHelper())->getListing($listingId);
+            if ($res['result'] === false) {
+                EbayPublishHelper::setListingStatus($listingId, 'publishFail', $res['message']);
+                throw new Exception($res['message']);
+            }
+            $listing = $res['data'];
+            $list = $listing['list'];
+            if (in_array($list['listing_status'],EbayPublish::RO_PUBLISH_STATUS)) {
+                return;
+            }
+            EbayPublishHelper::setListingStatus($listingId, 'publishing');
+            $verb = $list['listing_type'] == 2 ? 'AddItem' : 'AddFixedPriceItem';
+            $accountInfo = EbayAccount::get($list['account_id']);
+            if (empty($accountInfo)) {
+                EbayPublishHelper::setListingStatus($listingId, 'publishFail', '获取账号信息失败');
+                throw new Exception('获取账号信息失败');
+            }
+            $accountInfo = $accountInfo->toArray();
+            //处理图片
+            $imgs = $listing['imgs'];
+            $res = (new EbayPackApi())->uploadImgsToEps($imgs,$accountInfo,$listing['list']['site']);
+            try {
+                (new EbayListingImage())->saveAll($imgs);
+            } catch (\Exception $e) {
+                //不处理
+            }
+            if ($res['result'] === false) {
+                EbayPublishHelper::setListingStatus($listingId, 'publishFail', $res['message']);
+                throw new Exception($res['message']);
+            }
+            $listing['imgs'] = $imgs;
+            //上传数据
+            try {
+                $packApi = new EbayPackApi();
+                $api = $packApi->createApi($accountInfo, $verb, $listing['list']['site']);
+                $xml = $packApi->createXml($listing);
+                $response = $api->createHeaders()->__set('requesBody', $xml)->sendHttpRequest2();
+            } catch (\Exception $e) {
+                EbayPublishHelper::setListingStatus($listingId, 'publishFail', $e->getMessage());
+                throw new Exception($e->getMessage());
+            }
+            $res = (new EbayDealApiInformation())->dealWithApiResponse($verb,$response,$listing);
+            if ($res['result'] === false) {
+                EbayPublishHelper::setListingStatus($listingId, 'publishFail', $res['message']);
+                return false;
+            }
+            $update = $res['data'];
+            $update['listing_status'] = EbayPublishHelper::PUBLISH_STATUS['publishSuccess'];
+            EbayListing::update($update, ['id' => $list['id']]);
+            return true;
+        } catch (\Exception $e) {
+            throw new Exception($e->getMessage());
+        }
+    }
+}

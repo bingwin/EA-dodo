@@ -1,0 +1,46 @@
+<?php
+/**
+ * Created by PhpStorm.
+ * User: sky
+ * Date: 19-01-11
+ * Time: 下午5:56
+ */
+
+namespace swoole\cmd;
+
+
+use swoole\SwooleCmd;
+use swoole\SwooleCmdResult;
+use swoole\PipeMessageAction;
+use swoole\messageAction\StopQueueRuuner;
+
+class StopTableTask extends SwooleCmd
+{
+    public  function execute(\swoole_websocket_server $server): SwooleCmdResult
+    {
+        $result = new SwooleCmdResult($this);
+        if(isset($this->data['key']) && isset($this->data['task'])){
+            $key = $this->data['key'];
+            $task = $this->data['task'];
+            if($task){
+                $taskInfo = $server->tableTask->get($task);
+                if($taskInfo && $taskInfo['task'] === $key){
+                    $taskInfo['status'] = false;
+                    $server->tableTask->set($task, $taskInfo);
+                }
+            }else{
+                foreach($server->tableTask as $task => $info) {
+                    if($info['task'] === $key){
+                        $info['status'] = false;
+                        $server->tableTask->set($task, $info);
+                    }
+                }
+            }
+        }else{
+            $result->setCode('fail');
+            $result->setResult('missing parameters');
+        }
+        
+        return $result;
+    }
+}

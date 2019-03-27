@@ -1,0 +1,89 @@
+<?php
+/**
+ * Created by PhpStorm.
+ * User: rondaful_user
+ * Date: 2018/12/26
+ * Time: 19:47
+ */
+
+namespace app\publish\queue;
+
+
+use app\common\model\ebay\EbayActionLog;
+use app\common\model\ebay\EbayListing;
+use app\common\model\ebay\EbayListingVariation;
+use app\common\model\GoodsSku;
+use app\common\service\SwooleQueueJob;
+use app\common\service\UniqueQueuer;
+use app\publish\helper\ebay\EbayPublish;
+use think\Exception;
+
+class EbaySkuLocalStatusChange extends SwooleQueueJob
+{
+    protected $maxFailPushCount=3;
+
+    public function getName():string
+    {
+        return 'ebay SKU本地状态变化处理';
+    }
+
+    public function getDesc():string
+    {
+        return 'ebay SKU本地状态变化处理';
+    }
+
+    public function getAuthor():string
+    {
+        return 'wlw2533';
+    }
+
+    public  function execute()
+    {
+        set_time_limit(0);
+        try {
+            $skuId = $this->params;
+            $field = 'goods_id,sku,id';
+            $sku = GoodsSku::where('id', $skuId)->field($field)->find();
+            if (empty($sku)) {
+                throw new Exception('获取sku信息失败');
+            }
+            if (substr($sku['sku'],-2) == '00') {//单属性
+                $itemIds = EbayListing::where('goods_id',$sku['goods_id'])->column('item_id');
+                foreach ($itemIds as $itemId) {//直接下架
+                    (new EbayPublish())->endItem($itemId);
+                }
+            } else {//多属性
+                $wh = [
+                    'goods_id' => $sku['goods_id'],
+                    'item_id' => ['<>',0],
+                    'listing_status' => ['in',EbayPublish::OL_PUBLISH_STATUS],
+                    'draft' => 0,
+                ];
+                $listings = EbayListing::where($wh)->column('item_id','id');
+                $variants = EbayListingVariation::where('sku_id',$sku['id'])->whereIn('listing_id',array_keys($listings))
+                    ->column('v_qty,channel_map_code,listing_id','id');
+                $log = [
+                    'site' => 0,
+                    'listing_sku' => '',
+                    'api_type' => 1,
+                    'account_id' => 0,
+                    'create_id' => 0,
+                    'create_time' => time(),
+                    'cron_time' => 0,
+                    'remark' => '',
+                ];
+                foreach ($variants as $variant) {
+                    $oldVal = ['quantity'=>$variant['v_qty'],'listing_sku'=>$variant['channel_map_code']];
+                    $newVal = ['quantity'=>0,'listing_sku'=>$variant['channel_map_code']];
+                    $log['item_id'] = $listings[$variant['listing_id']];
+                    $log['new_val'] = json_encode($newVal);
+                    $log['old_val'] = json_encode($oldVal);
+                    $logId = EbayActionLog::insertGetId($log);
+                    (new UniqueQueuer(EbayUpdateOnlineListing::class))->push($logId);
+                }
+            }
+        } catch (\Exception $e) {
+            throw new Exception($e->getMessage());
+        }
+    }
+}
